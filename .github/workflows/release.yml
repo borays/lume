@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的版本标签（例如 v1.0.1）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build .app
+        run: |
+          cd lume
+          ./build-app.sh
+
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" lume/Info.plist)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package DMG
+        run: |
+          STAGE=$(mktemp -d)
+          cp -R lume/dist/Lume.app "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create \
+            -volname "Lume ${{ steps.version.outputs.version }}" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "Lume-${{ steps.version.outputs.version }}.dmg"
+
+      - name: Package source zip
+        run: |
+          git archive \
+            --format=zip \
+            --prefix="lume-${{ steps.version.outputs.version }}/" \
+            -o "lume-${{ steps.version.outputs.version }}-source.zip" \
+            HEAD
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lume-${{ steps.version.outputs.version }}
+          path: |
+            Lume-*.dmg
+            lume-*-source.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          FILES=(
+            "Lume-${{ steps.version.outputs.version }}.dmg"
+            "lume-${{ steps.version.outputs.version }}-source.zip"
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --title "微光 Lume ${{ steps.version.outputs.version }}" \
+              --generate-notes
+          fi
