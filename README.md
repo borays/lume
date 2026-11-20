@@ -84,6 +84,13 @@
 - 界面图标使用 Apple SF Symbols，须遵守 Apple 的许可条款
 - 应用图标与示例配图由本项目生成
 
+## 下载
+
+在 [Releases](https://github.com/borays/lume/releases) 下载 `Lume-<版本>.dmg` 或源码 zip。
+
+- DMG 由 GitHub Actions 在 Apple Silicon 运行器上构建，适用于 Apple Silicon Mac（macOS 14+）
+- 应用为 ad-hoc 签名，首次打开如被 Gatekeeper 拦截，请右键选择「打开」
+
 ## 构建与运行
 
 环境要求：macOS 14+，Xcode Command Line Tools（Swift 5.9+）。
