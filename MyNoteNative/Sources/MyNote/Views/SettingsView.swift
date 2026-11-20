@@ -50,7 +50,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("版本 1.0.0")
+            Text("版本 1.0.1")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
         }
