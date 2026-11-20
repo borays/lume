@@ -7,6 +7,9 @@ struct MarkdownPreview: NSViewRepresentable {
     let baseURL: URL?
     var title: String? = nil
     var fontFamily: String = ""
+    var fontSize: CGFloat = 14
+    /// 0 表示占满可用宽度。
+    var contentWidth: CGFloat = 740
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -27,6 +30,7 @@ struct MarkdownPreview: NSViewRepresentable {
         textView.isRichText = true
         textView.drawsBackground = true
         textView.backgroundColor = NSColor.textBackgroundColor
+        textView.maxContentWidth = Self.resolvedContentWidth(contentWidth)
         textView.updateInsets(for: 600)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
@@ -57,6 +61,8 @@ struct MarkdownPreview: NSViewRepresentable {
                 title: title,
                 baseURL: baseURL,
                 fontFamily: fontFamily,
+                fontSize: fontSize,
+                contentWidth: contentWidth,
                 scrollView: scrollView,
                 textView: textView,
                 preserveScroll: true,
@@ -77,6 +83,14 @@ struct MarkdownPreview: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.scrollView = scrollView
+        if let preview = textView as? PreviewTextView {
+            let resolved = Self.resolvedContentWidth(contentWidth)
+            let changed = preview.maxContentWidth != resolved
+            preview.maxContentWidth = resolved
+            preview.updateInsets(for: scrollView.contentSize.width)
+            // 容器宽度要等下一次布局才生效，图片上限和代码块页签需要重算。
+            if changed { context.coordinator.scheduleWidthRefresh() }
+        }
         context.coordinator.refresh = { [weak scrollView, weak textView, weak coordinator = context.coordinator] in
             guard let scrollView, let textView else { return }
             Self.renderSource(
@@ -84,6 +98,8 @@ struct MarkdownPreview: NSViewRepresentable {
                 title: title,
                 baseURL: baseURL,
                 fontFamily: fontFamily,
+                fontSize: fontSize,
+                contentWidth: contentWidth,
                 scrollView: scrollView,
                 textView: textView,
                 preserveScroll: true,
@@ -102,6 +118,8 @@ struct MarkdownPreview: NSViewRepresentable {
         title: String?,
         baseURL: URL?,
         fontFamily: String,
+        fontSize: CGFloat,
+        contentWidth: CGFloat,
         scrollView: NSScrollView,
         textView: NSTextView,
         preserveScroll: Bool,
@@ -113,7 +131,7 @@ struct MarkdownPreview: NSViewRepresentable {
         var options = MarkdownRenderOptions()
         options.baseURL = baseURL
         options.maxImageWidth = Self.availableContentWidth(scrollView: scrollView, textView: textView)
-        options.baseFontSize = 14
+        options.baseFontSize = fontSize
         options.baseFontFamily = fontFamily.isEmpty ? nil : fontFamily
         let attributed = MarkdownRenderer.render(source, options: options)
         textView.textStorage?.setAttributedString(attributed)
@@ -132,15 +150,22 @@ struct MarkdownPreview: NSViewRepresentable {
             source: source,
             title: title,
             fontFamily: fontFamily,
+            fontSize: fontSize,
+            contentWidth: contentWidth,
             width: scrollView.contentSize.width
         )
         coordinator?.lastBaseURL = baseURL
     }
 
-    private static func cacheKey(source: String, title: String?, fontFamily: String, width: CGFloat) -> String {
+    private static func cacheKey(source: String, title: String?, fontFamily: String, fontSize: CGFloat, contentWidth: CGFloat, width: CGFloat) -> String {
         let appearance = NSApp.effectiveAppearance.name.rawValue
         return source + "\u{1F}" + (title ?? "") + "\u{1F}" + appearance + "\u{1F}"
-            + String(Int(width.rounded())) + "\u{1F}" + fontFamily
+            + String(Int(width.rounded())) + "\u{1F}" + fontFamily + "\u{1F}"
+            + String(format: "%.1f", fontSize) + "\u{1F}" + String(Int(contentWidth.rounded()))
+    }
+
+    private static func resolvedContentWidth(_ width: CGFloat) -> CGFloat {
+        width > 0 ? width : .greatestFiniteMagnitude
     }
 
     private static func availableContentWidth(scrollView: NSScrollView, textView: NSTextView) -> CGFloat {
@@ -163,7 +188,14 @@ struct MarkdownPreview: NSViewRepresentable {
     private func render(context: Context, scrollView: NSScrollView, textView: NSTextView) {
         let coordinator = context.coordinator
         let source = MarkdownRenderer.bodyWithoutTitleHeading(markdown, title: title)
-        let cacheKey = Self.cacheKey(source: source, title: title, fontFamily: fontFamily, width: scrollView.contentSize.width)
+        let cacheKey = Self.cacheKey(
+            source: source,
+            title: title,
+            fontFamily: fontFamily,
+            fontSize: fontSize,
+            contentWidth: contentWidth,
+            width: scrollView.contentSize.width
+        )
         let baseChanged = coordinator.lastBaseURL != baseURL
         guard coordinator.lastMarkdown != cacheKey || baseChanged else {
             return
@@ -174,7 +206,7 @@ struct MarkdownPreview: NSViewRepresentable {
         var options = MarkdownRenderOptions()
         options.baseURL = baseURL
         options.maxImageWidth = Self.availableContentWidth(scrollView: scrollView, textView: textView)
-        options.baseFontSize = 14
+        options.baseFontSize = fontSize
         options.baseFontFamily = fontFamily.isEmpty ? nil : fontFamily
         let attributed = MarkdownRenderer.render(source, options: options)
         textView.textStorage?.setAttributedString(attributed)
@@ -327,7 +359,7 @@ struct MarkdownPreview: NSViewRepresentable {
 }
 
 final class PreviewTextView: NSTextView, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
-    private let maxContentWidth: CGFloat = 740
+    var maxContentWidth: CGFloat = 740
     private let minimumInset: CGFloat = 28
     var onWidthChange: ((CGFloat) -> Void)?
     private(set) var previewURL: URL?

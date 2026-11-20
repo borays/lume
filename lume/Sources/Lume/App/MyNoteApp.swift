@@ -5,6 +5,7 @@ import SwiftUI
 struct MyNoteApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = LibraryStore()
+    @StateObject private var shortcuts = ShortcutStore.shared
 
     init() {
         if CommandLine.arguments.contains("--selftest") {
@@ -27,7 +28,7 @@ struct MyNoteApp: App {
         }
         .defaultSize(width: 1280, height: 820)
         .commands {
-            AppCommands(store: store)
+            AppCommands(store: store, shortcuts: shortcuts)
         }
 
         Settings {

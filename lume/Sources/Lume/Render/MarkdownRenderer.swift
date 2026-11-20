@@ -378,11 +378,14 @@ enum MarkdownRenderer {
     }
 
     private static func appendHeading(_ nodes: [Markup], level: Int, options: MarkdownRenderOptions, to output: NSMutableAttributedString) {
-        let sizes: [CGFloat] = [26, 21, 17, 15, 13.5, 13.5]
-        let size = sizes[max(0, min(level - 1, sizes.count - 1))]
+        // 字号随阅读字号等比缩放，基准 13.5 对应 26/21/17/15/13.5。
+        let scales: [CGFloat] = [1.93, 1.56, 1.26, 1.11, 1.0, 1.0]
+        let base = max(10, options.baseFontSize)
+        let raw = base * scales[max(0, min(level - 1, scales.count - 1))]
+        let size = (raw * 2).rounded() / 2
         let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacingBefore = 14
-        paragraph.paragraphSpacing = 7
+        paragraph.paragraphSpacingBefore = max(10, (base * 1.04).rounded())
+        paragraph.paragraphSpacing = max(5, (base * 0.52).rounded())
         paragraph.lineSpacing = 2
         let font = options.font(size: size, weight: level <= 2 ? .bold : .semibold)
         let attributed = inline(nodes, font: font, color: .labelColor, options: options)
@@ -400,6 +403,11 @@ enum MarkdownRenderer {
                color: context.quoteDepth > 0 ? .secondaryLabelColor : .labelColor
            ) {
             appendDisplayMath(rendered, options: options, to: output)
+            return
+        }
+
+        if context.quoteDepth == 0, nodes.count == 1, let image = nodes[0] as? Image {
+            appendImageFigure(image, options: options, to: output)
             return
         }
 
@@ -1431,7 +1439,8 @@ enum MarkdownRenderer {
         let fullRange = NSRange(text.startIndex..., in: text)
         let matches = urlPattern.matches(in: text, range: fullRange)
         if matches.isEmpty {
-            InlineExtensions.append(text, style: inlineStyle, to: result)
+            let display = style.attributes[.link] != nil ? softBreakable(text) : text
+            InlineExtensions.append(display, style: inlineStyle, to: result)
             return
         }
         var cursor = 0
@@ -1448,13 +1457,39 @@ enum MarkdownRenderer {
             if let url = URL(string: urlText) {
                 attributes[.link] = url
             }
-            result.append(NSAttributedString(string: urlText, attributes: attributes))
+            result.append(NSAttributedString(string: softBreakable(urlText), attributes: attributes))
             cursor = match.range.location + match.range.length
         }
         if cursor < fullRange.length {
             let tailRange = NSRange(location: cursor, length: fullRange.length - cursor)
             InlineExtensions.append(substring(text, tailRange), style: inlineStyle, to: result)
         }
+    }
+
+    /// 超长 URL 在预览里没有断行机会会溢出色块，这里按分隔符插入零宽空格。
+    /// 只处理纯 ASCII 的长链接，避免影响中文正文；链接目标仍保留原 URL。
+    private static func softBreakable(_ text: String) -> String {
+        guard text.count > 56,
+              !text.contains(where: { $0.isWhitespace }),
+              text.unicodeScalars.allSatisfy({ $0.isASCII }),
+              text.contains("/") || text.contains("?") || text.contains("&")
+        else { return text }
+        let separators: Set<Character> = [":", "/", "?", "&", "=", "#", ".", "_", "-"]
+        var result = String()
+        result.reserveCapacity(text.count + text.count / 8)
+        var run = 0
+        for character in text {
+            result.append(character)
+            run += 1
+            if separators.contains(character) {
+                result.append("\u{200B}")
+                run = 0
+            } else if run >= 32 {
+                result.append("\u{200B}")
+                run = 0
+            }
+        }
+        return result
     }
 
     private static func resolveURL(_ raw: String, baseURL: URL?) -> URL? {
@@ -1510,6 +1545,42 @@ enum MarkdownRenderer {
             .lumeImagePixelSize: NSValue(size: original)
         ], range: NSRange(location: 0, length: attachmentString.length))
         result.append(attachmentString)
+    }
+
+    /// 独占一段的图片居中显示，alt 文字作为题注放在图下。
+    private static func appendImageFigure(_ image: Image, options: MarkdownRenderOptions, to output: NSMutableAttributedString) {
+        let alt = plainText(of: Array(image.children)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let font = options.font(size: options.baseFontSize)
+        let picture = NSMutableAttributedString()
+        appendImage(alt: alt, path: image.source ?? "", font: font, options: options, to: picture)
+        guard picture.length > 0,
+              picture.attribute(.attachment, at: 0, effectiveRange: nil) != nil else {
+            // 远程图或文件缺失时 appendImage 已给出文字占位，不再重复题注。
+            if picture.length > 0 {
+                output.append(picture)
+                output.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+            }
+            return
+        }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacingBefore = 6
+        paragraph.paragraphSpacing = alt.isEmpty ? 12 : 2
+        picture.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: picture.length))
+        output.append(picture)
+        output.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: paragraph]))
+        guard !alt.isEmpty else { return }
+        let captionFont = options.font(size: max(11, options.baseFontSize - 2.5))
+        let captionParagraph = NSMutableParagraphStyle()
+        captionParagraph.alignment = .center
+        captionParagraph.paragraphSpacing = 12
+        let caption = NSAttributedString(string: alt, attributes: [
+            .font: captionFont,
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: captionParagraph
+        ])
+        output.append(caption)
+        output.append(NSAttributedString(string: "\n", attributes: [.font: captionFont, .paragraphStyle: captionParagraph]))
     }
 
     static func resizeImages(in storage: NSTextStorage?, maxWidth: CGFloat) {

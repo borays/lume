@@ -2,6 +2,7 @@ import SwiftUI
 
 struct EditorFormatBar: View {
     @ObservedObject private var bridge = EditorBridge.shared
+    @ObservedObject private var shortcuts = ShortcutStore.shared
 
     private static let codeLanguages: [(label: String, fence: String)] = [
         ("代码块", ""),
@@ -24,28 +25,28 @@ struct EditorFormatBar: View {
                 HStack(spacing: 1) {
                     headingMenu
                     separator
-                    iconButton("bold", "加粗（⌘B）") { bridge.toggleWrap("**") }
-                    iconButton("italic", "斜体（⌘I）") { bridge.toggleWrap("*") }
-                    iconButton("strikethrough", "删除线") { bridge.toggleStrike() }
-                    iconButton("highlighter", "高亮（==文字==）") { bridge.toggleHighlight() }
-                    iconButton("chevron.left.forwardslash.chevron.right", "行内代码（⇧⌘C）") { bridge.toggleWrap("`") }
+                    iconButton("bold", tip(.bold, "加粗")) { bridge.toggleWrap("**") }
+                    iconButton("italic", tip(.italic, "斜体")) { bridge.toggleWrap("*") }
+                    iconButton("strikethrough", tip(.strikethrough, "删除线")) { bridge.toggleStrike() }
+                    iconButton("highlighter", tip(.highlight, "高亮（==文字==）")) { bridge.toggleHighlight() }
+                    iconButton("chevron.left.forwardslash.chevron.right", tip(.inlineCode, "行内代码")) { bridge.toggleWrap("`") }
                     separator
-                    iconButton("text.quote", "引用") { bridge.applyQuote() }
-                    iconButton("list.bullet", "项目符号（⇧⌘L）") { bridge.applyList(ordered: false) }
-                    iconButton("list.number", "编号列表（⇧⌘O）") { bridge.applyList(ordered: true) }
-                    iconButton("checklist", "任务列表") { bridge.applyTaskList() }
+                    iconButton("text.quote", tip(.quote, "引用")) { bridge.applyQuote() }
+                    iconButton("list.bullet", tip(.bulletList, "项目符号")) { bridge.applyList(ordered: false) }
+                    iconButton("list.number", tip(.numberedList, "编号列表")) { bridge.applyList(ordered: true) }
+                    iconButton("checklist", tip(.taskList, "任务列表")) { bridge.applyTaskList() }
                     separator
-                    iconButton("link", "插入链接（⌘K）") { bridge.insertLink() }
-                    iconButton("photo", "插入图片（⌃⌘I）") { bridge.insertImage() }
+                    iconButton("link", tip(.link, "插入链接")) { bridge.insertLink() }
+                    iconButton("photo", tip(.image, "插入图片")) { bridge.insertImage() }
                     iconButton("paperclip", "插入附件") { bridge.insertAttachment() }
-                    iconButton("tablecells", "插入表格") { bridge.insertTable() }
+                    iconButton("tablecells", tip(.table, "插入表格")) { bridge.insertTable() }
                     mathMenu
-                    iconButton("number.circle", "插入脚注（自动编号）") { bridge.insertFootnote() }
+                    iconButton("number.circle", tip(.footnote, "插入脚注（自动编号）")) { bridge.insertFootnote() }
                     alertMenu
                     codeMenu
                     diagramMenu
-                    iconButton("minus", "插入分隔线") { bridge.insertDivider() }
-                    iconButton("calendar", "插入当前日期（⌥⌘D）") { bridge.insertDate() }
+                    iconButton("minus", tip(.divider, "插入分隔线")) { bridge.insertDivider() }
+                    iconButton("calendar", tip(.date, "插入当前日期")) { bridge.insertDate() }
 
                     Spacer(minLength: 8)
                     separator
@@ -73,6 +74,8 @@ struct EditorFormatBar: View {
             Button("二级标题") { bridge.setHeading(level: 2) }
             Button("三级标题") { bridge.setHeading(level: 3) }
             Button("四级标题") { bridge.setHeading(level: 4) }
+            Button("五级标题") { bridge.setHeading(level: 5) }
+            Button("六级标题") { bridge.setHeading(level: 6) }
         } label: {
             HStack(spacing: 3) {
                 Text("标题")
@@ -226,6 +229,11 @@ struct EditorFormatBar: View {
         }
         .padding(.horizontal, 4)
         .background(Color(nsColor: .quaternaryLabelColor).opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+    }
+
+    private func tip(_ id: AppCommandID, _ title: String) -> String {
+        guard let display = shortcuts.display(for: id) else { return title }
+        return "\(title)（\(display)）"
     }
 
     private func iconButton(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {

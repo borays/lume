@@ -384,6 +384,89 @@ enum SelfTest {
         check(extra.string.contains("删除线") && struckRuns > 0, "双波浪线仍渲染为删除线（\(struckRuns) 段）")
         check(extra.string.contains("a~b~c"), "行内代码里的波浪线不被改写")
 
+        // 标题字号随阅读字号缩放
+        do {
+            func maxFontSize(_ attributed: NSAttributedString) -> CGFloat {
+                var size: CGFloat = 0
+                attributed.enumerateAttribute(.font, in: NSRange(location: 0, length: attributed.length)) { value, _, _ in
+                    if let font = value as? NSFont { size = max(size, font.pointSize) }
+                }
+                return size
+            }
+            let normal = MarkdownRenderer.render("# 标题\n\n正文", options: MarkdownRenderOptions(baseFontSize: 13.5))
+            let large = MarkdownRenderer.render("# 标题\n\n正文", options: MarkdownRenderOptions(baseFontSize: 20))
+            let normalSize = maxFontSize(normal)
+            let largeSize = maxFontSize(large)
+            check(abs(normalSize - 26) < 0.6, "标题字号基准 26（实际 \(normalSize)）")
+            check(largeSize > normalSize * 1.3, "阅读字号放大后标题同步放大（\(normalSize) → \(largeSize)）")
+        }
+
+        // 超长 URL 的换行机会
+        do {
+            let raw = "https://example.com/some/very/long/path/to/a/resource?token=abcdefghijklmnopqrstuvwxyz0123456789"
+            let renderedURL = MarkdownRenderer.render("下载地址：\(raw)")
+            check(renderedURL.string.contains("\u{200B}"), "超长 URL 插入换行机会")
+            var linked: URL?
+            renderedURL.enumerateAttribute(.link, in: NSRange(location: 0, length: renderedURL.length)) { value, _, stop in
+                if let url = value as? URL { linked = url; stop.pointee = true }
+            }
+            check(linked?.absoluteString == raw, "换行机会不影响链接目标（\(linked?.absoluteString ?? "nil")）")
+            let shortRendered = MarkdownRenderer.render("https://example.com/a")
+            check(!shortRendered.string.contains("\u{200B}"), "短链接不插入零宽空格")
+        }
+
+        // 独占一段的图片：居中并显示题注
+        do {
+            let imageRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mynote-selftest-img-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: imageRoot, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: imageRoot) }
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 120, pixelsHigh: 60, bitsPerSample: 8,
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0
+            )
+            if let data = rep?.representation(using: .png, properties: [:]) {
+                try? data.write(to: imageRoot.appendingPathComponent("diagram.png"))
+                var options = MarkdownRenderOptions(baseURL: imageRoot)
+                options.maxImageWidth = 300
+                let figure = MarkdownRenderer.render("![示意图](diagram.png)", options: options)
+                var attachments = 0
+                figure.enumerateAttribute(.attachment, in: NSRange(location: 0, length: figure.length)) { value, _, _ in
+                    if value is NSTextAttachment { attachments += 1 }
+                }
+                check(attachments == 1, "独占一段的图片渲染为附件")
+                check(figure.string.contains("示意图"), "图片 alt 作为题注显示")
+            } else {
+                check(false, "无法生成测试图片")
+            }
+        }
+
+        // 快捷键存储：覆盖、唯一性、禁用与重置
+        do {
+            let suiteName = "Lume.selftest.shortcuts.\(UUID().uuidString)"
+            if let defaults = UserDefaults(suiteName: suiteName) {
+                defaults.removePersistentDomain(forName: suiteName)
+                let store = ShortcutStore(defaults: defaults, storageKey: "test")
+                check(store.shortcut(for: .bold)?.display == "⌘B", "默认快捷键 ⌘B")
+                store.set(Shortcut(key: "j", command: true), for: .bold)
+                check(store.shortcut(for: .bold)?.display == "⌘J", "自定义快捷键生效")
+                let reloaded = ShortcutStore(defaults: defaults, storageKey: "test")
+                check(reloaded.shortcut(for: .bold)?.display == "⌘J", "快捷键写入后重新加载仍生效")
+                store.set(Shortcut(key: "i", command: true), for: .bold)
+                check(store.shortcut(for: .italic) == nil, "重复组合自动从其他命令移除")
+                store.set(nil, for: .bold)
+                check(store.shortcut(for: .bold) == nil && store.shortcut(for: .italic) == nil,
+                      "清空组合后两项都不占用")
+                store.resetAll()
+                check(store.shortcut(for: .bold)?.display == "⌘B" && store.shortcut(for: .italic)?.display == "⌘I",
+                      "恢复默认后还原内置组合")
+                defaults.removePersistentDomain(forName: suiteName)
+            } else {
+                check(false, "无法创建临时 UserDefaults")
+            }
+        }
+
         // 网页导入：正文提取与 HTML→Markdown
         do {
             let html = """

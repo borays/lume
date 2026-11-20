@@ -3,6 +3,8 @@ import SwiftUI
 struct DetailView: View {
     @EnvironmentObject var store: LibraryStore
     @ObservedObject private var bridge = EditorBridge.shared
+    @AppStorage(ReadingPreferences.fontSizeKey) private var previewFontSize = ReadingPreferences.defaultFontSize
+    @AppStorage(ReadingPreferences.contentWidthKey) private var previewContentWidth = ReadingPreferences.defaultContentWidth
 
     var body: some View {
         Group {
@@ -159,7 +161,9 @@ struct DetailView: View {
                 markdown: store.previewMarkdown,
                 baseURL: store.currentFolderURL,
                 title: store.titleDraft,
-                fontFamily: bridge.fontFamily
+                fontFamily: bridge.fontFamily,
+                fontSize: CGFloat(previewFontSize),
+                contentWidth: CGFloat(previewContentWidth)
             )
             if previewIsEmpty {
                 VStack(spacing: 10) {
