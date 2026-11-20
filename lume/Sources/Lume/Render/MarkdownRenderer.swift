@@ -12,6 +12,8 @@ struct MarkdownRenderOptions {
     /// 用户选择的正文/标题字体族，空表示系统字体；代码块始终使用等宽字体。
     var baseFontFamily: String?
     var isPrinting: Bool = false
+    /// 预览里图片走后台加载，缺图时先显示占位；导出与自测仍同步读取。
+    var asynchronousImages: Bool = false
     var footnotes: FootnoteRegistry?
     var mathItems: [MathExtractor.Item] = []
     var taskCounter: TaskIndexCounter?
@@ -79,19 +81,7 @@ enum MarkdownRenderer {
         pattern: "https?://[A-Za-z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%]+"
     )
 
-    private static let imageCache = NSCache<NSString, NSImage>()
-
-    private static func cachedImage(at url: URL) -> NSImage? {
-        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate?.timeIntervalSince1970 ?? 0
-        let key = "\(url.path)|\(Int(modified))" as NSString
-        if let cached = imageCache.object(forKey: key) { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        image.cacheMode = .always
-        imageCache.setObject(image, forKey: key)
-        return image
-    }
-
+    
     static func render(_ markdown: String, options: MarkdownRenderOptions = MarkdownRenderOptions()) -> NSAttributedString {
         let document = Frontmatter.split(markdown)
         let footnotes = FootnoteParser.extract(document.body)
@@ -1521,30 +1511,69 @@ enum MarkdownRenderer {
         } else {
             fileURL = nil
         }
-        guard let fileURL, let image = cachedImage(at: fileURL) else {
-            if !alt.isEmpty {
-                result.append(NSAttributedString(string: "[图片：\(alt)]", attributes: [
-                    .font: italicFont(font),
-                    .foregroundColor: NSColor.secondaryLabelColor
-                ]))
+        guard let fileURL else {
+            appendMissingImage(alt: alt, font: font, to: result)
+            return
+        }
+        let maxWidth = max(120, options.maxImageWidth)
+        if options.asynchronousImages {
+            if let image = MarkdownImageStore.cachedImage(for: fileURL) {
+                result.append(attachmentString(for: image, url: fileURL, maxWidth: maxWidth))
+            } else {
+                MarkdownImageStore.requestImage(for: fileURL)
+                result.append(imagePlaceholder(alt: alt, url: fileURL, font: font, maxWidth: maxWidth))
             }
             return
         }
+        guard let image = MarkdownImageStore.image(for: fileURL) else {
+            appendMissingImage(alt: alt, font: font, to: result)
+            return
+        }
+        result.append(attachmentString(for: image, url: fileURL, maxWidth: maxWidth))
+    }
+
+    private static func appendMissingImage(alt: String, font: NSFont, to result: NSMutableAttributedString) {
+        guard !alt.isEmpty else { return }
+        result.append(NSAttributedString(string: "[图片：\(alt)]", attributes: [
+            .font: italicFont(font),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]))
+    }
+
+    private static func imagePlaceholder(alt: String, url: URL, font: NSFont, maxWidth: CGFloat) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.paragraphSpacingBefore = 6
+        paragraph.paragraphSpacing = 12
+        return NSAttributedString(string: "正在加载图片…", attributes: [
+            .font: italicFont(font),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+            .paragraphStyle: paragraph,
+            .lumeImagePendingURL: url,
+            .lumeImagePendingAlt: alt,
+            .lumeImagePendingMaxWidth: maxWidth
+        ])
+    }
+
+    static func attachmentString(for image: NSImage, url: URL, maxWidth: CGFloat) -> NSAttributedString {
         let attachment = NSTextAttachment()
         attachment.image = image
-        let maxWidth = max(120, options.maxImageWidth)
-        let original = image.size
-        var scale = maxWidth / max(original.width, 1)
+        attachment.bounds = imageBounds(for: image.size, maxWidth: maxWidth)
+        let attachmentString = NSMutableAttributedString(attachment: attachment)
+        attachmentString.addAttributes([
+            .lumeImageURL: url,
+            .lumeImagePixelSize: NSValue(size: image.size)
+        ], range: NSRange(location: 0, length: attachmentString.length))
+        return attachmentString
+    }
+
+    static func imageBounds(for original: CGSize, maxWidth: CGFloat) -> CGRect {
+        let limit = max(120, maxWidth)
+        var scale = limit / max(original.width, 1)
         scale = min(scale, 2.2)
         scale = min(scale, 1600 / max(original.height, 1))
         scale = max(scale, 0.02)
-        attachment.bounds = CGRect(x: 0, y: 0, width: original.width * scale, height: original.height * scale)
-        let attachmentString = NSMutableAttributedString(attachment: attachment)
-        attachmentString.addAttributes([
-            .lumeImageURL: fileURL,
-            .lumeImagePixelSize: NSValue(size: original)
-        ], range: NSRange(location: 0, length: attachmentString.length))
-        result.append(attachmentString)
+        return CGRect(x: 0, y: 0, width: original.width * scale, height: original.height * scale)
     }
 
     /// 独占一段的图片居中显示，alt 文字作为题注放在图下。
@@ -1553,8 +1582,9 @@ enum MarkdownRenderer {
         let font = options.font(size: options.baseFontSize)
         let picture = NSMutableAttributedString()
         appendImage(alt: alt, path: image.source ?? "", font: font, options: options, to: picture)
-        guard picture.length > 0,
-              picture.attribute(.attachment, at: 0, effectiveRange: nil) != nil else {
+        let rendered = picture.attribute(.attachment, at: 0, effectiveRange: nil) != nil
+            || picture.attribute(.lumeImagePendingURL, at: 0, effectiveRange: nil) != nil
+        guard picture.length > 0, rendered else {
             // 远程图或文件缺失时 appendImage 已给出文字占位，不再重复题注。
             if picture.length > 0 {
                 output.append(picture)

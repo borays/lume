@@ -437,6 +437,26 @@ enum SelfTest {
                 }
                 check(attachments == 1, "独占一段的图片渲染为附件")
                 check(figure.string.contains("示意图"), "图片 alt 作为题注显示")
+
+                // 异步模式：缺图先占位，加载完成后直接使用缓存补图
+                try? data.write(to: imageRoot.appendingPathComponent("diagram-async.png"))
+                var asyncOptions = MarkdownRenderOptions(baseURL: imageRoot)
+                asyncOptions.maxImageWidth = 300
+                asyncOptions.asynchronousImages = true
+                let pending = MarkdownRenderer.render("![示意图](diagram-async.png)", options: asyncOptions)
+                check(
+                    pending.attribute(.lumeImagePendingURL, at: 0, effectiveRange: nil) != nil,
+                    "异步模式首次渲染先显示占位"
+                )
+                check(
+                    MarkdownImageStore.image(for: imageRoot.appendingPathComponent("diagram-async.png")) != nil,
+                    "图片可同步读入共享缓存"
+                )
+                let filled = MarkdownRenderer.render("![示意图](diagram-async.png)", options: asyncOptions)
+                check(
+                    filled.attribute(.attachment, at: 0, effectiveRange: nil) is NSTextAttachment,
+                    "缓存命中后异步模式直接显示图片"
+                )
             } else {
                 check(false, "无法生成测试图片")
             }

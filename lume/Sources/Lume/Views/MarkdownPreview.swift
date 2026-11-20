@@ -76,6 +76,7 @@ struct MarkdownPreview: NSViewRepresentable {
             }
         }
         context.coordinator.observeHighlightUpdates()
+        context.coordinator.observeImageUpdates()
         render(context: context, scrollView: scrollView, textView: textView)
         return scrollView
     }
@@ -87,9 +88,12 @@ struct MarkdownPreview: NSViewRepresentable {
             let resolved = Self.resolvedContentWidth(contentWidth)
             let changed = preview.maxContentWidth != resolved
             preview.maxContentWidth = resolved
-            preview.updateInsets(for: scrollView.contentSize.width)
-            // 容器宽度要等下一次布局才生效，图片上限和代码块页签需要重算。
-            if changed { context.coordinator.scheduleWidthRefresh() }
+            if changed {
+                // 只有阅读宽度设置变化时才重新计算留白，避免每次 SwiftUI 更新都触发 AppKit 排版。
+                preview.updateInsets(for: scrollView.contentSize.width)
+                // 容器宽度要等下一次布局才生效，图片上限和代码块页签需要重算。
+                context.coordinator.scheduleWidthRefresh()
+            }
         }
         context.coordinator.refresh = { [weak scrollView, weak textView, weak coordinator = context.coordinator] in
             guard let scrollView, let textView else { return }
@@ -133,6 +137,7 @@ struct MarkdownPreview: NSViewRepresentable {
         options.maxImageWidth = Self.availableContentWidth(scrollView: scrollView, textView: textView)
         options.baseFontSize = fontSize
         options.baseFontFamily = fontFamily.isEmpty ? nil : fontFamily
+        options.asynchronousImages = true
         let attributed = MarkdownRenderer.render(source, options: options)
         textView.textStorage?.setAttributedString(attributed)
         if let container = textView.textContainer, let layout = textView.layoutManager {
@@ -208,6 +213,7 @@ struct MarkdownPreview: NSViewRepresentable {
         options.maxImageWidth = Self.availableContentWidth(scrollView: scrollView, textView: textView)
         options.baseFontSize = fontSize
         options.baseFontFamily = fontFamily.isEmpty ? nil : fontFamily
+        options.asynchronousImages = true
         let attributed = MarkdownRenderer.render(source, options: options)
         textView.textStorage?.setAttributedString(attributed)
         if let container = textView.textContainer, let layout = textView.layoutManager {
@@ -236,6 +242,10 @@ struct MarkdownPreview: NSViewRepresentable {
         private var pendingWidthRefresh: DispatchWorkItem?
         private var pendingHighlightRefresh: DispatchWorkItem?
         private var highlightObserver: NSObjectProtocol?
+        private var imageObserver: NSObjectProtocol?
+        private var pendingImages: [URL: NSImage] = [:]
+        private var failedImages = Set<URL>()
+        private var pendingImagePatch: DispatchWorkItem?
 
         // Code block header tabs are absolute points, so they need a full re-render once resizing settles.
         func scheduleWidthRefresh() {
@@ -270,6 +280,90 @@ struct MarkdownPreview: NSViewRepresentable {
             ) { [weak self] _ in
                 self?.scheduleHighlightRefresh()
             }
+        }
+
+        /// 后台读到的图片按占位段原地替换，不再整篇重渲染。
+        /// 一次打开多图笔记时会把完成事件合并成一次排版，避免连续跳动。
+        func observeImageUpdates() {
+            imageObserver = NotificationCenter.default.addObserver(
+                forName: MarkdownImageStore.didFinishLoading,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let self,
+                      let rawURL = note.userInfo?["url"] as? URL else { return }
+                let url = rawURL.standardizedFileURL
+                if let image = note.userInfo?["image"] as? NSImage {
+                    self.pendingImages[url] = image
+                } else {
+                    self.failedImages.insert(url)
+                }
+                self.scheduleImagePatch()
+            }
+        }
+
+        private func scheduleImagePatch() {
+            pendingImagePatch?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.applyLoadedImages()
+            }
+            pendingImagePatch = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        }
+
+        private func applyLoadedImages() {
+            guard !pendingImages.isEmpty || !failedImages.isEmpty else { return }
+            let images = pendingImages
+            let failures = failedImages
+            pendingImages.removeAll()
+            failedImages.removeAll()
+            guard let textView, let storage = textView.textStorage else { return }
+            let fullRange = NSRange(location: 0, length: storage.length)
+            guard fullRange.length > 0 else { return }
+
+            var patches: [(range: NSRange, replacement: NSAttributedString)] = []
+            storage.enumerateAttribute(.lumeImagePendingURL, in: fullRange) { value, range, _ in
+                guard let url = (value as? URL)?.standardizedFileURL else { return }
+                let paragraph = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil)
+                if let image = images[url] ?? MarkdownImageStore.cachedImage(for: url) {
+                    let maxWidth = storage.attribute(
+                        .lumeImagePendingMaxWidth, at: range.location, effectiveRange: nil
+                    ) as? CGFloat ?? 560
+                    let replacement = NSMutableAttributedString(
+                        attributedString: MarkdownRenderer.attachmentString(for: image, url: url, maxWidth: maxWidth)
+                    )
+                    if let paragraph {
+                        replacement.addAttribute(
+                            .paragraphStyle, value: paragraph,
+                            range: NSRange(location: 0, length: replacement.length)
+                        )
+                    }
+                    patches.append((range, replacement))
+                } else if failures.contains(url) {
+                    patches.append((range, NSAttributedString(string: "[图片]", attributes: [
+                        .font: storage.attribute(.font, at: range.location, effectiveRange: nil)
+                            ?? NSFont.systemFont(ofSize: 13),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ])))
+                }
+            }
+            guard !patches.isEmpty else { return }
+
+            let origin = scrollView?.contentView.bounds.origin
+            storage.beginEditing()
+            for patch in patches.reversed() where NSMaxRange(patch.range) <= storage.length {
+                storage.replaceCharacters(in: patch.range, with: patch.replacement)
+            }
+            storage.endEditing()
+            if let container = textView.textContainer, let layout = textView.layoutManager {
+                layout.ensureLayout(for: container)
+            }
+            textView.setNeedsDisplay(textView.bounds)
+            if let scrollView, let origin {
+                scrollView.contentView.scroll(to: origin)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+            (textView as? PreviewTextView)?.refreshHoverAtMouse()
         }
 
         /// 异步高亮完成后按块原地补色：不重建 attributedString，
@@ -338,9 +432,15 @@ struct MarkdownPreview: NSViewRepresentable {
             pendingWidthRefresh = nil
             pendingHighlightRefresh?.cancel()
             pendingHighlightRefresh = nil
+            pendingImagePatch?.cancel()
+            pendingImagePatch = nil
             if let highlightObserver {
                 NotificationCenter.default.removeObserver(highlightObserver)
                 self.highlightObserver = nil
+            }
+            if let imageObserver {
+                NotificationCenter.default.removeObserver(imageObserver)
+                self.imageObserver = nil
             }
         }
 

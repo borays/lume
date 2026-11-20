@@ -13,6 +13,12 @@ extension NSAttributedString.Key {
     static let lumeImageURL = NSAttributedString.Key("LumeImageURL")
     /// 图片在图库中的原始像素尺寸，供窗口缩放时重新排版。
     static let lumeImagePixelSize = NSAttributedString.Key("LumeImagePixelSize")
+    /// 后台加载中的图片占位：原始文件地址，加载完成后按此定位并替换。
+    static let lumeImagePendingURL = NSAttributedString.Key("LumeImagePendingURL")
+    /// 占位段的 alt 文本（图片加载失败时用于兜底提示）。
+    static let lumeImagePendingAlt = NSAttributedString.Key("LumeImagePendingAlt")
+    /// 占位段生成时的可用图片宽度，补图时据此计算附件尺寸。
+    static let lumeImagePendingMaxWidth = NSAttributedString.Key("LumeImagePendingMaxWidth")
     /// 任务清单复选框在文档中的序号（从 0 开始），点击时用于回写。
     static let lumeTaskIndex = NSAttributedString.Key("LumeTaskIndex")
 }
