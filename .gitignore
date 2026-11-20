@@ -7,3 +7,17 @@ lume/.swiftpm/
 MiaoYan-main/
 marktext-develop/
 backup/
+
+# 计划 / 需求类文档不入库
+PLAN.md
+plan.md
+PRD.md
+prd.md
+**/*-plan.md
+**/*_plan.md
+**/*.plan.md
+**/*-prd.md
+**/*_prd.md
+**/*.prd.md
+docs/plan/
+docs/prd/
