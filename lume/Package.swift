@@ -16,8 +16,7 @@ let package = Package(
                 .product(name: "Markdown", package: "swift-markdown"),
                 .product(name: "SwiftHighlight", package: "swift-highlight"),
                 .product(name: "SwiftSoup", package: "SwiftSoup")
-            ],
-            path: "Sources/MyNote"
+            ]
         )
     ]
 )

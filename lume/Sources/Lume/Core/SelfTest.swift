@@ -164,7 +164,7 @@ enum SelfTest {
         }
 
         let root = testRoot()
-        print("MyNote self-test")
+        print("Lume self-test")
         print("library: \(root.path)")
 
         let scanner = LibraryScanner(root: root)

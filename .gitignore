@@ -1,9 +1,9 @@
 .DS_Store
 *.log
 all_output/
-MyNoteNative/.build/
-MyNoteNative/dist/
-MyNoteNative/.swiftpm/
+lume/.build/
+lume/dist/
+lume/.swiftpm/
 MiaoYan-main/
 marktext-develop/
 backup/
