@@ -1,0 +1,550 @@
+import AppKit
+import Foundation
+
+enum SelfTest {
+    static func webImportDebugAndExit(_ raw: String) {
+        Task { @MainActor in
+            do {
+                let article = try await WebImportService.parse(raw, allowWebKitFallback: false)
+                print("title=\(article.title)")
+                print("host=\(article.sourceHost)")
+                print("author=\(article.author ?? "-")")
+                print("images=\(article.images.count)")
+                print("chars=\(article.markdown.count)")
+                print("textLength=\(article.textLength)")
+                let output = "/tmp/mynote-web-import.md"
+                try? article.markdown.write(toFile: output, atomically: true, encoding: .utf8)
+                print("wrote=\(output)")
+
+                if let root = ProcessInfo.processInfo.environment["MYNOTE_WEB_ROOT"], !root.isEmpty {
+                    let folder = ProcessInfo.processInfo.environment["MYNOTE_WEB_FOLDER"] ?? "00-收件箱"
+                    let rootURL = URL(fileURLWithPath: root)
+                    let markdown = try await WebImportService.materialize(
+                        article, folder: folder, root: rootURL
+                    ) { text in
+                        print(text)
+                    }
+                    let paths = LibraryPaths(root: rootURL)
+                    let folderURL = folder.isEmpty ? rootURL : try paths.resolve(relative: folder)
+                    try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+                    let folderDir = URL(fileURLWithPath: folderURL.path, isDirectory: true)
+                    let title = LibraryStore.sanitizeFileName(article.title)
+                    let fileURL = folderDir.appendingPathComponent("\(title).md")
+                    let content = Frontmatter.createDocument(
+                        title: title,
+                        tags: article.suggestedTags,
+                        body: "# \(title)\n\n> 来源：[原文](<\(article.sourceURL.absoluteString)>)\n\n\(markdown)"
+                    )
+                    try content.write(to: fileURL, atomically: true, encoding: .utf8)
+                    print("saved=\(fileURL.path)")
+
+                    let pattern = try! NSRegularExpression(pattern: #"!\[[^\]]*\]\(([^)]+)\)"#)
+                    let ns = markdown as NSString
+                    var local = 0
+                    var missing: [String] = []
+                    for match in pattern.matches(in: markdown, range: NSRange(location: 0, length: ns.length)) {
+                        let link = ns.substring(with: match.range(at: 1))
+                        guard !link.hasPrefix("http") else { continue }
+                        local += 1
+                        let target = URL(string: link, relativeTo: folderDir)?.standardizedFileURL
+                        guard let target else {
+                            missing.append(link + " (路径无法解析)")
+                            continue
+                        }
+                        if !FileManager.default.fileExists(atPath: target.path) {
+                            missing.append(link)
+                        } else if NSImage(contentsOf: target) == nil {
+                            missing.append(link + " (无法解码)")
+                        }
+                    }
+                    print("localImages=\(local) broken=\(missing.count)")
+                    for item in missing { print("  broken: \(item)") }
+
+                    let rendered = MarkdownRenderer.render(
+                        content,
+                        options: MarkdownRenderOptions(baseURL: folderDir)
+                    )
+                    var renderedImages = 0
+                    rendered.enumerateAttribute(
+                        .attachment,
+                        in: NSRange(location: 0, length: rendered.length)
+                    ) { value, _, _ in
+                        if let attachment = value as? NSTextAttachment, attachment.image != nil {
+                            renderedImages += 1
+                        }
+                    }
+                    print("renderedImages=\(renderedImages)")
+                }
+                print("--- preview ---")
+                print(String(article.markdown.prefix(1500)))
+                exit(0)
+            } catch {
+                print("FAILED: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+        while true {
+            RunLoop.main.run(until: Date().addingTimeInterval(3600))
+        }
+    }
+
+    static func renderDebugAndExit(_ path: String) -> Never {
+        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        let document = Frontmatter.split(text)
+        let rendered = MarkdownRenderer.render(text)
+        print("hasHeader=\(document.hasHeader)")
+        print("bodyPrefix=\(document.body.prefix(60).debugDescription)")
+        print("renderPrefix=\(rendered.string.prefix(80).debugDescription)")
+        var tableBlocks = 0
+        rendered.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: rendered.length)) { value, _, _ in
+            if let style = value as? NSParagraphStyle,
+               style.textBlocks.contains(where: { $0 is NSTextTableBlock }) {
+                tableBlocks += 1
+            }
+        }
+        print("tableBlocks=\(tableBlocks)")
+
+        // 等待 SwiftHighlight 异步高亮完成后重新渲染，验证「自动渲染」生效
+        let deadline = Date().addingTimeInterval(2.5)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let upgraded = MarkdownRenderer.render(text)
+        var coloredRuns = 0
+        let upgradedRange = NSRange(location: 0, length: upgraded.length)
+        upgraded.enumerateAttribute(.foregroundColor, in: upgradedRange) { value, _, _ in
+            if let color = value as? NSColor, color != NSColor.labelColor {
+                coloredRuns += 1
+            }
+        }
+        print("coloredRuns=\(coloredRuns)")
+
+        let probe = "struct Probe { let value: Int }"
+        _ = CodeHighlightService.highlight(code: probe, language: "swift", fontSize: 12)
+        let probeDeadline = Date().addingTimeInterval(1.5)
+        while Date() < probeDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        print("swiftHighlightCacheHit=\(CodeHighlightService.highlight(code: probe, language: "swift", fontSize: 12) != nil)")
+
+        let textStorage = NSTextStorage(attributedString: upgraded)
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: 680, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layoutManager.addTextContainer(container)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 680, height: 1400), textContainer: container)
+        textView.isEditable = false
+        textView.textContainerInset = NSSize(width: 20, height: 20)
+        textView.layoutManager?.ensureLayout(for: container)
+        print("usesProvidedManager=\(textView.layoutManager === layoutManager)")
+        print("usedRect=\(layoutManager.usedRect(for: container))")
+        if let rep = textView.bitmapImageRepForCachingDisplay(in: textView.bounds) {
+            textView.cacheDisplay(in: textView.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                try? data.write(to: URL(fileURLWithPath: "/tmp/mynote-render-debug.png"))
+                print("wrote /tmp/mynote-render-debug.png")
+            }
+        }
+        exit(0)
+    }
+
+    static func runAndExit() -> Never {
+        var failures: [String] = []
+        var checks = 0
+
+        func check(_ condition: @autoclosure () -> Bool, _ label: String) {
+            checks += 1
+            if !condition() {
+                failures.append(label)
+                print("FAIL  \(label)")
+            } else {
+                print("ok    \(label)")
+            }
+        }
+
+        let root = testRoot()
+        print("MyNote self-test")
+        print("library: \(root.path)")
+
+        let scanner = LibraryScanner(root: root)
+        var result: ScanResult?
+        do {
+            result = try scanner.scan()
+        } catch {
+            failures.append("扫描失败：\(error.localizedDescription)")
+            print("FAIL  扫描知识库：\(error.localizedDescription)")
+        }
+
+        if let result {
+            print("notes: \(result.notes.count)  tags: \(result.tags.count)  top folders: \(result.folderTree.children.count)")
+            check(result.notes.count >= 400, "扫描到至少 400 篇笔记（实际 \(result.notes.count)）")
+            check(result.notes.allSatisfy { !$0.title.isEmpty }, "所有笔记都有标题")
+            check(Set(result.notes.map(\.id)).count == result.notes.count, "笔记相对路径唯一")
+            check(result.notes.allSatisfy { !$0.body.isEmpty }, "所有笔记内容非空")
+            check(result.notes.allSatisfy { $0.relPath.hasSuffix(".md") }, "笔记均为 Markdown")
+            check(result.tags.count >= 20, "标签数量正常（实际 \(result.tags.count)）")
+            check(result.folderTree.children.contains { $0.name.hasPrefix("01-") }, "目录树包含一级分类")
+            check(result.notes.contains { $0.tags.contains("Ceph") }, "Ceph 标签存在")
+
+            let matcher = SearchMatcher(notes: result.notes)
+            let cephHits = matcher.rank(result.notes, query: "ceph")
+            check(cephHits.count >= 10, "搜索 ceph 命中（实际 \(cephHits.count)）")
+            let tagHits = matcher.rank(result.notes, query: "#Ceph")
+            check(!tagHits.isEmpty && tagHits.allSatisfy { $0.tags.contains("Ceph") }, "标签搜索 #Ceph")
+            let chinese = matcher.rank(result.notes, query: "存储")
+            check(!chinese.isEmpty, "中文全文搜索命中（\(chinese.count)）")
+            let multi = matcher.rank(result.notes, query: "ceph 集群")
+            check(multi.allSatisfy { note in
+                let blob = (note.title + note.body).lowercased()
+                return blob.contains("ceph") && blob.contains("集群")
+            }, "多关键词同时命中")
+        }
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mynote-selftest-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+            let title = "测试 \"引号\" 与 #井号"
+            let doc = Frontmatter.createDocument(title: title, tags: ["存储", "Ceph"], body: "# 旧标题\n\n正文内容")
+            let parsed = Frontmatter.parse(doc)
+            check(parsed.title == title, "frontmatter 标题往返一致")
+            check(parsed.tags == ["存储", "Ceph"], "frontmatter 标签往返一致")
+            check(parsed.body.contains("正文内容"), "frontmatter 正文提取")
+
+            let retitled = Frontmatter.setTitle("新标题", in: doc)
+            check(Frontmatter.parse(retitled).title == "新标题", "更新 frontmatter 标题")
+            let tagged = Frontmatter.setTags(["a", "b,c"], in: retitled)
+            check(Frontmatter.parse(tagged).tags == ["a", "b,c"], "更新标签支持逗号")
+            let headed = Frontmatter.setH1("新标题", in: tagged)
+            check(headed.contains("\n# 新标题\n"), "同步一级标题")
+
+            let file = tempRoot.appendingPathComponent("测试.md")
+            try headed.write(to: file, atomically: true, encoding: .utf8)
+            let reloaded = try LibraryScanner(root: tempRoot).scan()
+            check(reloaded.notes.count == 1, "临时库扫描一篇")
+            check(reloaded.notes.first?.title == "新标题", "临时库标题解析")
+            check(reloaded.notes.first?.tags == ["a", "b,c"], "临时库标签解析")
+            try? FileManager.default.removeItem(at: tempRoot)
+        } catch {
+            failures.append("临时库测试失败：\(error.localizedDescription)")
+            print("FAIL  临时库测试：\(error.localizedDescription)")
+        }
+
+        let paths = LibraryPaths(root: root)
+        do {
+            _ = try paths.resolve(relative: "../outside.md")
+            failures.append("路径安全：未能拒绝 ../outside.md")
+            print("FAIL  路径安全拒绝 ../outside.md")
+        } catch {
+            checks += 1
+            print("ok    路径安全拒绝 ../outside.md")
+        }
+        do {
+            _ = try paths.resolve(relative: "/etc/passwd")
+            failures.append("路径安全：未能拒绝绝对路径")
+            print("FAIL  路径安全拒绝绝对路径")
+        } catch {
+            checks += 1
+            print("ok    路径安全拒绝绝对路径")
+        }
+        do {
+            let url = try paths.resolve(relative: "04-存储/Ceph")
+            check(paths.contains(url), "合法相对路径解析并通过包含校验")
+        } catch {
+            failures.append("合法相对路径解析失败：\(error.localizedDescription)")
+            print("FAIL  合法相对路径解析：\(error.localizedDescription)")
+        }
+
+        let sample = """
+        # 标题
+
+        这是 **粗体** 与 `代码`，链接 [示例](https://example.com)。
+
+        ```bash
+        ceph -s
+        ```
+
+        | 名称 | 值 |
+        | --- | --- |
+        | osd | 3 |
+
+        - 项目一
+        - [x] 已完成
+        """
+        let rendered = MarkdownRenderer.render(sample)
+        check(rendered.length > 40, "Markdown 渲染输出非空（\(rendered.length) 字符）")
+        check(rendered.string.contains("ceph -s"), "代码块内容保留")
+        check(rendered.string.contains("osd"), "表格内容保留")
+        check(rendered.string.contains("标题"), "标题内容保留")
+        var codeLanguages: Set<String> = []
+        rendered.enumerateAttribute(.lumeCodeLanguage, in: NSRange(location: 0, length: rendered.length)) { value, _, _ in
+            if let value = value as? String, !value.isEmpty { codeLanguages.insert(value) }
+        }
+        check(codeLanguages.contains("bash"), "代码块携带语言标识（实际 \(codeLanguages.sorted())）")
+
+        let extended = MarkdownRenderer.render("""
+        行内 $E = mc^2$ 与 ==高亮==，H~2~O 与 x^2^，脚注[^a]。
+
+        > [!WARNING]
+        > 告警内容
+        > - 列表项
+
+        | 左 | 中 | 右 |
+        | :-- | :-: | --: |
+        | a | b | c |
+
+        <details>
+        <summary>展开</summary>
+        内部 **Markdown**
+        </details>
+
+        - [ ] 未完成
+        - [x] 已完成
+
+        [^a]: 第一条脚注，含公式 $x_1$。
+        """)
+        check(extended.string.contains("高亮") && !extended.string.contains("=="), "行内高亮语法移除标记")
+        check(extended.string.contains("Warning") && !extended.string.contains("[!WARNING]"), "GitHub 告警识别为卡片")
+        check(extended.string.contains("内部") && extended.string.contains("Markdown"), "details 正文渲染")
+        check(extended.string.contains("第一条脚注"), "脚注定义渲染")
+        var mathAttachments = 0
+        var taskMarks = 0
+        extended.enumerateAttribute(.attachment, in: NSRange(location: 0, length: extended.length)) { value, _, _ in
+            if value is NSTextAttachment { mathAttachments += 1 }
+        }
+        extended.enumerateAttribute(.lumeTaskIndex, in: NSRange(location: 0, length: extended.length)) { value, _, _ in
+            if value != nil { taskMarks += 1 }
+        }
+        check(mathAttachments >= 2, "公式渲染为图像附件（实际 \(mathAttachments)）")
+        check(taskMarks == 2, "任务清单可点击索引（实际 \(taskMarks)）")
+
+        let extra = MarkdownRenderer.render("""
+        术语1
+        : 术语1的解释文本
+
+        术语2
+        : 术语2的解释，可以换行
+        多行描述内容
+
+        ```
+        flowchart LR
+            A[开始] --> B{判断条件}
+        ```
+
+        ```
+        graph TD
+            subgraph 存储层
+                S1[(MySQL)]
+            end
+            API[API服务] --> S1
+        ```
+
+        H~2~O 与 2^10^ = 1024，<u>下划线</u> 和 <span style="color:#1a237e">深蓝</span>。
+
+        ~~删除线~~ 与 `a~b~c` 保持原样。
+        """)
+        let extraRange = NSRange(location: 0, length: extra.length)
+        var diagramCopies = 0
+        var indentedDefinitions = 0
+        var subscriptRuns = 0
+        var superscriptRuns = 0
+        var underlinedRuns = 0
+        var struckRuns = 0
+        extra.enumerateAttribute(.lumeCopyLink, in: extraRange) { value, _, _ in
+            if value != nil { diagramCopies += 1 }
+        }
+        extra.enumerateAttribute(.paragraphStyle, in: extraRange) { value, _, _ in
+            if let style = value as? NSParagraphStyle, style.headIndent == 22 { indentedDefinitions += 1 }
+        }
+        extra.enumerateAttribute(.baselineOffset, in: extraRange) { value, _, _ in
+            guard let offset = value as? CGFloat else { return }
+            if offset < 0 { subscriptRuns += 1 }
+            if offset > 0 { superscriptRuns += 1 }
+        }
+        extra.enumerateAttribute(.underlineStyle, in: extraRange) { value, _, _ in
+            if value != nil { underlinedRuns += 1 }
+        }
+        extra.enumerateAttribute(.strikethroughStyle, in: extraRange) { value, _, _ in
+            if value != nil { struckRuns += 1 }
+        }
+        check(!extra.string.contains("flowchart LR") && diagramCopies >= 2,
+              "无语言围栏识别为 Mermaid 图表（复制入口 \(diagramCopies)）")
+        check(extra.string.contains("术语1的解释文本") && !extra.string.contains(": 术语1"),
+              "定义列表去掉行首冒号")
+        check(indentedDefinitions > 0, "定义列表解释文本缩进（\(indentedDefinitions) 段）")
+        check(extra.string.contains("H2O") && !extra.string.contains("~2~") && subscriptRuns > 0,
+              "下标 ~2~ 渲染（\(subscriptRuns) 段）")
+        check(extra.string.contains("1024") && !extra.string.contains("^10^") && superscriptRuns > 0,
+              "上标 ^10^ 渲染（\(superscriptRuns) 段）")
+        check(extra.string.contains("下划线") && !extra.string.contains("<u>") && underlinedRuns > 0,
+              "行内 HTML <u> 渲染为下划线")
+        check(extra.string.contains("深蓝") && !extra.string.contains("<span"),
+              "行内 HTML <span> 保留文本")
+        check(extra.string.contains("删除线") && struckRuns > 0, "双波浪线仍渲染为删除线（\(struckRuns) 段）")
+        check(extra.string.contains("a~b~c"), "行内代码里的波浪线不被改写")
+
+        // 网页导入：正文提取与 HTML→Markdown
+        do {
+            let html = """
+            <html><head>
+            <title>页面标题</title>
+            <meta property="og:title" content="测试文章标题">
+            <meta name="keywords" content="GPU, 运维, GPU">
+            </head><body>
+            <nav>站内导航</nav>
+            <div id="js_content">
+            <h1>测试文章标题</h1>
+            <section style="display: flex"><span style="display:block">01</span><span style="display:block">PART</span><span style="display:block">一、故障排查</span></section>
+            <p>正文第一段，说明 GPU 故障排查的入口和观测顺序。这一段故意写长一些，确保正文评分高于页面其他区域，也覆盖中文标点与<strong>加粗</strong>内容。</p>
+            <p>正文第二段包含 <a href="/rel/path?x=1&amp;y=2">相对链接</a>，以及行内代码 <code>nvidia-smi -q</code>。</p>
+            <p><img data-src="https://mmbiz.qpic.cn/img/640?wx_fmt=png&amp;tp=webp" alt="示意图"></p>
+            <pre><code class="language-bash">ceph -s
+            ceph osd tree</code></pre>
+            <ul><li>第一项</li><li>第二项<ul><li>嵌套项</li></ul></li></ul>
+            <table><tr><th>观测点</th><th>含义</th></tr><tr><td>ECC</td><td>显存纠错</td></tr></table>
+            <blockquote>引用内容</blockquote>
+            </div>
+            </body></html>
+            """
+            let pageURL = URL(string: "https://example.com/post/1")!
+            let output = try ArticleExtractor.extract(html: html, pageURL: pageURL)
+            check(output.title == "测试文章标题", "网页标题提取（\(output.title)）")
+            check(!output.markdown.contains("# 测试文章标题") && output.markdown.contains("一、故障排查"),
+                  "网页正文去掉重复大标题")
+            check(output.markdown.hasPrefix("一、故障排查") && !output.markdown.contains("PART"),
+                  "网页正文去掉开头装饰标签（01/PART）")
+            check(!output.markdown.contains("站内导航"), "网页导航噪声已移除")
+            check(output.markdown.contains("**加粗**"), "网页 strong 转 Markdown")
+            check(output.markdown.contains("[相对链接](https://example.com/rel/path?x=1&y=2)"),
+                  "网页相对链接补全为绝对地址")
+            check(output.markdown.contains("```bash"), "网页代码块保留语言")
+            check(output.markdown.contains("  - 嵌套项"), "网页嵌套列表缩进")
+            check(output.markdown.contains("| 观测点 | 含义 |") && output.markdown.contains("| ECC | 显存纠错 |"),
+                  "网页表格转 GFM")
+            check(output.markdown.contains("> 引用内容"), "网页引用块转 Markdown")
+            check(output.images.count == 1
+                  && output.images.first?.url.absoluteString.contains("wx_fmt=png") == true
+                  && output.images.first?.url.absoluteString.contains("tp=webp") == false,
+                  "网页懒加载图片转本地占位并去掉 webp 参数")
+            check(output.markdown.contains("lume-img://0"), "网页图片占位符写入正文")
+            check(output.suggestedTags == ["GPU", "运维"], "网页关键词去重为标签建议")
+            check(WebImportService.normalizeURL("mp.weixin.qq.com/s/abc")?.absoluteString == "https://mp.weixin.qq.com/s/abc",
+                  "网页地址自动补全 https")
+            check(WebImportService.normalizeURL("ftp://example.com/a") == nil, "非 http 地址被拒绝")
+        } catch {
+            check(false, "网页导入解析失败：\(error.localizedDescription)")
+        }
+
+        let taskText = """
+        - [ ] 一
+        ```text
+        - [ ] 代码内不算
+        ```
+        - [x] 二
+        """
+        let taskLocations = LibraryStore.taskMarkerLocations(in: taskText)
+        check(taskLocations.count == 2, "任务标记定位跳过代码围栏（实际 \(taskLocations.count)）")
+        check(taskLocations.count == 2
+              && (taskText as NSString).substring(with: NSRange(location: taskLocations[1], length: 1)) == "x",
+              "任务标记位置指向勾选状态字符")
+
+        // 悬停复制图标：同一代码块内切换行时图标位置与像素不变
+        do {
+            let source = "```bash\nceph -s\nceph osd tree\n```\n"
+            let storage = NSTextStorage(attributedString: MarkdownRenderer.render(source))
+            let layout = NSLayoutManager()
+            storage.addLayoutManager(layout)
+            let container = NSTextContainer(size: NSSize(width: 520, height: CGFloat.greatestFiniteMagnitude))
+            container.widthTracksTextView = true
+            layout.addTextContainer(container)
+            let view = PreviewTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 400), textContainer: container)
+            view.isEditable = false
+            view.isSelectable = true
+            view.updateInsets(for: 520)
+            let window = NSWindow(
+                contentRect: NSRect(x: -4000, y: -4000, width: 520, height: 400),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.contentView = view
+            layout.ensureLayout(for: container)
+
+            var block = NSRange(location: NSNotFound, length: 0)
+            storage.enumerateAttribute(.lumeCopyCode, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+                if value != nil, block.location == NSNotFound {
+                    block = range
+                    stop.pointee = true
+                }
+            }
+            let glyphs = layout.glyphRange(forCharacterRange: block, actualCharacterRange: nil)
+            let blockRect = layout.boundingRect(forGlyphRange: glyphs, in: container)
+            let origin = view.textContainerOrigin
+            let iconRect = NSRect(
+                x: origin.x + container.size.width - 22 - 10,
+                y: origin.y + blockRect.minY - 4,
+                width: 22,
+                height: 22
+            ).insetBy(dx: -8, dy: -8)
+
+            func hover(_ point: NSPoint) {
+                guard let event = NSEvent.mouseEvent(
+                    with: .mouseMoved, location: point, modifierFlags: [], timestamp: 0,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0
+                ) else { return }
+                view.mouseMoved(with: event)
+            }
+            func iconPixels() -> Data? {
+                guard let rep = view.bitmapImageRepForCachingDisplay(in: iconRect) else { return nil }
+                view.cacheDisplay(in: iconRect, to: rep)
+                return rep.representation(using: .png, properties: [:])
+            }
+
+            view.resetHover()
+            let idle = iconPixels()
+            let firstFragment = layout.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+            let lastFragment = layout.lineFragmentRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+            let x = origin.x + container.size.width / 2
+            hover(view.convert(NSPoint(x: x, y: origin.y + firstFragment.midY), to: nil))
+            let first = iconPixels()
+            hover(view.convert(NSPoint(x: x, y: origin.y + lastFragment.midY), to: nil))
+            let second = iconPixels()
+
+            check(block.location != NSNotFound && blockRect.height > 20, "预览代码块可定位悬停区域")
+            check(idle != nil && first != nil && first != idle, "悬停代码块显示复制图标")
+            check(first != nil && second == first, "同一代码块内切换行图标不闪")
+        }
+
+        if let result {
+            var renderFailures = 0
+            for note in result.notes.prefix(40) {
+                let renderedNote = MarkdownRenderer.render(
+                    note.body,
+                    options: MarkdownRenderOptions(baseURL: note.url.deletingLastPathComponent())
+                )
+                if renderedNote.length == 0 { renderFailures += 1 }
+            }
+            check(renderFailures == 0, "抽样渲染 40 篇笔记均有输出")
+        }
+
+        print("")
+        if failures.isEmpty {
+            print("PASS  \(checks) checks")
+            exit(0)
+        } else {
+            print("FAILED  \(failures.count)/\(checks) checks")
+            exit(1)
+        }
+    }
+
+    private static func testRoot() -> URL {
+        if let index = CommandLine.arguments.firstIndex(of: "--root"),
+           index + 1 < CommandLine.arguments.count {
+            return URL(fileURLWithPath: CommandLine.arguments[index + 1])
+        }
+        if let env = ProcessInfo.processInfo.environment["MYNOTE_ROOT"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Notes/MyNote")
+    }
+}

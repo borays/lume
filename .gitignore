@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+all_output/
+MyNoteNative/.build/
+MyNoteNative/dist/
+MyNoteNative/.swiftpm/
+MiaoYan-main/
+marktext-develop/
