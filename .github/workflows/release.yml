@@ -69,15 +69,61 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
         run: |
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+
+          NOTES=$(mktemp)
+          TMP=$(mktemp -d)
+          : > "$TMP/新增"; : > "$TMP/修复"; : > "$TMP/优化"; : > "$TMP/文档"; : > "$TMP/其他"
+
+          git log --pretty=format:'%s|%h%n' "$RANGE" | while IFS='|' read -r subject hash; do
+            [ -z "$subject" ] && continue
+            case "$subject" in
+              Merge*) continue ;;
+              "chore: 版本号"*) continue ;;
+              feat:*) text="${subject#feat: }"; section="新增" ;;
+              feat\(*) text="${subject#*): }"; section="新增" ;;
+              fix:*) text="${subject#fix: }"; section="修复" ;;
+              fix\(*) text="${subject#*): }"; section="修复" ;;
+              refactor:*|perf:*|style:*) text="${subject#*: }"; section="优化" ;;
+              docs:*) text="${subject#docs: }"; section="文档" ;;
+              *) text="$subject"; section="其他" ;;
+            esac
+            printf -- "- %s (%s)\n" "$text" "$hash" >> "$TMP/$section"
+          done
+
+          echo "## 变更内容" > "$NOTES"
+          echo >> "$NOTES"
+          for section in 新增 修复 优化 文档 其他; do
+            if [ -s "$TMP/$section" ]; then
+              printf '### %s\n\n' "$section" >> "$NOTES"
+              cat "$TMP/$section" >> "$NOTES"
+              echo >> "$NOTES"
+            fi
+          done
+          if [ -n "$PREV" ]; then
+            printf '**Full Changelog**: %s/%s/compare/%s...%s\n' "$SERVER" "$REPO" "$PREV" "$TAG" >> "$NOTES"
+          else
+            printf '**Full Changelog**: %s/%s/commits/%s\n' "$SERVER" "$REPO" "$TAG" >> "$NOTES"
+          fi
+          cat "$NOTES"
+
           FILES=(
             "Lume-${{ steps.version.outputs.version }}.dmg"
             "lume-${{ steps.version.outputs.version }}-source.zip"
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${FILES[@]}" --clobber
+            gh release edit "$TAG" --notes-file "$NOTES"
           else
             gh release create "$TAG" "${FILES[@]}" \
               --title "微光 Lume ${{ steps.version.outputs.version }}" \
-              --generate-notes
+              --notes-file "$NOTES"
           fi
