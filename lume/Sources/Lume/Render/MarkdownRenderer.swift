@@ -1582,14 +1582,13 @@ enum MarkdownRenderer {
         let font = options.font(size: options.baseFontSize)
         let picture = NSMutableAttributedString()
         appendImage(alt: alt, path: image.source ?? "", font: font, options: options, to: picture)
+        guard picture.length > 0 else { return }
         let rendered = picture.attribute(.attachment, at: 0, effectiveRange: nil) != nil
             || picture.attribute(.lumeImagePendingURL, at: 0, effectiveRange: nil) != nil
-        guard picture.length > 0, rendered else {
+        guard rendered else {
             // 远程图或文件缺失时 appendImage 已给出文字占位，不再重复题注。
-            if picture.length > 0 {
-                output.append(picture)
-                output.append(NSAttributedString(string: "\n", attributes: [.font: font]))
-            }
+            output.append(picture)
+            output.append(NSAttributedString(string: "\n", attributes: [.font: font]))
             return
         }
         let paragraph = NSMutableParagraphStyle()

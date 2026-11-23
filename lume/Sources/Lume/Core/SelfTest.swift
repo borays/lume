@@ -457,6 +457,12 @@ enum SelfTest {
                     filled.attribute(.attachment, at: 0, effectiveRange: nil) is NSTextAttachment,
                     "缓存命中后异步模式直接显示图片"
                 )
+
+                // 公众号导入的图片常无 alt 或为远程地址，渲染为空段落时不能越界读取属性
+                let remoteEmptyAlt = MarkdownRenderer.render("![](https://example.com/a.png)", options: options)
+                check(remoteEmptyAlt.length == 0, "无 alt 的远程图片渲染为空段落且不崩溃")
+                let missingEmptyAlt = MarkdownRenderer.render("![](no-such-file.png)", options: options)
+                check(missingEmptyAlt.length == 0, "无 alt 的缺失图片渲染为空段落且不崩溃")
             } else {
                 check(false, "无法生成测试图片")
             }
