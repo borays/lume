@@ -545,6 +545,149 @@ enum SelfTest {
             check(false, "网页导入解析失败：\(error.localizedDescription)")
         }
 
+        // 网页导入：CSDN 正文容器优先，推荐位与页头噪声不进正文
+        do {
+            let html = """
+            <html><head>
+            <title>CSDN 测试文章完整标题-CSDN博客</title>
+            <meta property="og:title" content="CSDN 测试文章">
+            <meta property="article:published_time" content="2026-11-20T20:14:46+08:00">
+            <meta name="keywords" content="html,前端">
+            </head><body>
+            <main>
+            <div class="article-header-box">
+            <h1 class="title-article" id="articleContentId">CSDN 测试文章完整标题</h1>
+            <a id="uid" title="某作者">某作者</a>阅读量 123 收藏 4
+            </div>
+            <article class="baidu_pl">
+            <div class="article_content clearfix">
+            <div id="content_views" class="htmledit_views">
+            <p>CSDN 正文第一段，说明语义化标签在实际页面中的作用与常见误区，篇幅需要足够长，避免正文容器被页头或推荐位抢走评分。</p>
+            <p>CSDN 正文第二段，继续补充 header 与 nav 的适用场景、可访问性收益以及和 div 的取舍建议。</p>
+            <h4>2. nav 导航区域</h4>
+            <pre><code>&lt;nav&gt;navigate&lt;/nav&gt;</code></pre>
+            </div>
+            </div>
+            </article>
+            <div class="recommend-box"><div class="recommend-item-box">推荐阅读：其他文章标题</div></div>
+            </main>
+            </body></html>
+            """
+            let output = try ArticleExtractor.extract(
+                html: html,
+                pageURL: URL(string: "https://blog.csdn.net/someone/article/details/1")!
+            )
+            check(output.title == "CSDN 测试文章完整标题", "CSDN 标题取 h1 完整标题（\(output.title)）")
+            check(output.author == "某作者", "CSDN 作者取 uid 标题（\(output.author ?? "nil")）")
+            check(output.publishedAt == "2026-11-20T20:14:46+08:00", "CSDN 发布时间取 meta")
+            check(output.markdown.contains("CSDN 正文第一段"), "CSDN 正文容器内容保留")
+            check(!output.markdown.contains("推荐阅读"), "CSDN 推荐位不进入正文")
+            check(!output.markdown.contains("阅读量 123"), "CSDN 页头统计不进入正文")
+            check(output.suggestedTags == ["html", "前端"], "CSDN 关键词作为标签建议")
+        } catch {
+            check(false, "CSDN 网页导入解析失败：\(error.localizedDescription)")
+        }
+
+        // 网页导入：开头导流与文末推广截断
+        do {
+            let html = """
+            <html><head>
+            <meta property="og:title" content="推广截断测试">
+            </head><body>
+            <div id="js_content">
+            <p>★ 点击名片，关注我们不迷路 ★</p>
+            <p>这段正文用于验证文末推广截断逻辑：正文第一段解释为什么需要去掉公众号导流，说明文末资料包和二维码会把正文撑得很长，也会下载一批与文章内容无关的推广图片。这一段继续补充细节，确保正文长度超过两百个字符，从而触发百分之六十的位置判断，同时验证正常内容不会被误删。</p>
+            <p>正文第二段继续陈述：文章真正有价值的部分应当保留，包括命令、结论和作者观点；推广信息则应当被截断，避免污染搜索索引和阅读体验。为保证测试稳定，这里再多写一些内容，让正文总长度明确超过两百个字符，同时保持语义通顺。</p>
+            <p><img data-src="https://mmbiz.qpic.cn/body.png" alt="正文配图"></p>
+            <hr>
+            <section>
+            <p>近期好文：</p>
+            <p>另一篇文章的标题链接。</p>
+            <p><img data-src="https://mmbiz.qpic.cn/qrcode.png" alt="二维码"></p>
+            <p>“点赞”+“红心”，让我元气满满</p>
+            </section>
+            </div>
+            </body></html>
+            """
+            let output = try ArticleExtractor.extract(
+                html: html,
+                pageURL: URL(string: "https://mp.weixin.qq.com/s/promo")!
+            )
+            check(!output.markdown.contains("点击名片"), "开头导流名片行已移除")
+            check(!output.markdown.contains("近期好文") && !output.markdown.contains("点赞"),
+                  "文末近期好文推广已截断")
+            check(output.markdown.contains("正文第二段继续陈述"), "截断保留正文全部段落")
+            check(output.images.count == 1
+                  && output.images.first?.url.absoluteString.contains("body.png") == true,
+                  "文末推广图片不进入下载列表")
+            check(!output.markdown.hasSuffix("---"), "截断后不残留分隔线")
+        } catch {
+            check(false, "推广截断解析失败：\(error.localizedDescription)")
+        }
+
+        // 网页导入：文末福利资料包（封面 + 多张截图 + 二维码）整段移除
+        do {
+            let html = """
+            <html><head>
+            <meta property="og:title" content="文末福利测试">
+            </head><body>
+            <div id="js_content">
+            <div class="article-body">
+            <p>这篇文章的正文全部保留：先描述时间同步的测量模型，再解释 chrony 的滤波策略与内核时钟接口。为了让位置判断落在正文之后，这里继续补充足够长的正文内容，确保标记词出现时已经超过全文的百分之六十，也保证截断后剩余正文不少于两百个字。</p>
+            <p>第二段继续说明生产环境基线、硬件时间戳与四维拆解方法。这些内容都是真正的技术细节，需要在导入后完整保留，不能因为文末存在推广资料包就被误删，因此测试同时校验正文段落仍然存在。</p>
+            <section>
+            <p><img data-src="https://mmbiz.qpic.cn/cover.jpg" alt="封面"></p>
+            <p>文末福利</p>
+            <p>今天分享一份很长的学习笔记，需要的尽管收藏。</p>
+            <h2>笔记介绍</h2>
+            <p><img data-src="https://mmbiz.qpic.cn/page1.png" alt="笔记截图"></p>
+            <h2>笔记展示</h2>
+            <p><img data-src="https://mmbiz.qpic.cn/page2.png" alt="笔记截图"></p>
+            <h2>笔记下载</h2>
+            <p>扫描下方二维码，回复暗号领取。</p>
+            <p><img data-src="https://mmbiz.qpic.cn/qr.png" alt="二维码"></p>
+            </section>
+            </div>
+            </div>
+            </body></html>
+            """
+            let output = try ArticleExtractor.extract(
+                html: html,
+                pageURL: URL(string: "https://mp.weixin.qq.com/s/fuli")!
+            )
+            check(output.markdown.contains("先描述时间同步的测量模型"), "外层容器中的正文不被误删")
+            check(!output.markdown.contains("文末福利") && !output.markdown.contains("笔记下载"),
+                  "文末福利资料包整段移除")
+            check(output.markdown.contains("第二段继续说明生产环境基线"), "资料包前面的正文保留")
+            check(output.images.isEmpty && !output.markdown.contains("lume-img://"),
+                  "资料包图片不下载也不留占位")
+        } catch {
+            check(false, "文末福利截断解析失败：\(error.localizedDescription)")
+        }
+
+        // 网页导入：正文中间出现“推荐阅读”不误伤
+        do {
+            let html = """
+            <html><head>
+            <meta property="og:title" content="正常文章测试">
+            </head><body>
+            <div id="js_content">
+            <p>正文第一段说明推荐系统的召回与排序并不是本文重点，这里只是顺带提到推荐阅读相关的话题，用来说明段落中间的普通词汇不应该触发截断逻辑，正文需要完整保留下来。这一段继续补充背景，让全文长度超过两百个字符，确保位置判断真正参与计算，而不是被长度下限直接跳过。</p>
+            <h2>推荐阅读</h2>
+            <p>正文第二段继续讨论渲染性能、图片加载与缓存策略，并给出具体的观测命令和调优建议，确保文章在导入后仍然保留全部章节与内容结构，不因为标题命中关键词而被截掉后半部分。这里再补充一些说明，让后半段也有足够的篇幅，便于验证截断逻辑确实没有执行。</p>
+            </div>
+            </body></html>
+            """
+            let output = try ArticleExtractor.extract(
+                html: html,
+                pageURL: URL(string: "https://mp.weixin.qq.com/s/normal")!
+            )
+            check(output.markdown.contains("## 推荐阅读") && output.markdown.contains("正文第二段继续讨论"),
+                  "正文中段的推荐标题不触发截断")
+        } catch {
+            check(false, "正常文章解析失败：\(error.localizedDescription)")
+        }
+
         let taskText = """
         - [ ] 一
         ```text

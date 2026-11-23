@@ -14,7 +14,6 @@ enum ArticleExtractor {
     }
 
     private static let contentSelectors = [
-        "#js_content",
         "article",
         "main",
         "[role=main]",
@@ -31,14 +30,27 @@ enum ArticleExtractor {
         "button", "input", "select", "textarea", "nav", "footer", "aside",
         ".js_ad_link", ".rich_media_tool", ".rich_media_area_extra",
         "#js_pc_qr_code", "mp-common-profile", "mp-style-type",
-        "mp-common-miniprogram", "mpvoice", "mpprofile"
+        "mp-common-miniprogram", "mpvoice", "mpprofile",
+        ".mp_profile_iframe_wrp"
     ].joined(separator: ", ")
+
+    private static let promotionMarkers = [
+        "文末福利", "文末推荐", "近期好文", "往期好文", "往期推荐", "往期回顾",
+        "往期精选", "推荐阅读", "相关推荐", "更多推荐", "推荐关注", "活动推荐",
+        "直播推荐", "课程推荐", "福利时间", "粉丝福利", "扫码关注", "长按识别",
+        "扫码领取"
+    ]
+
+    private static let leadingPromotions = [
+        "点击名片", "点击上方蓝字", "点击蓝字关注", "关注我们不迷路"
+    ]
 
     static func extract(html: String, pageURL: URL) throws -> Output {
         let document = try SwiftSoup.parse(html, pageURL.absoluteString)
 
         let title = firstText([
             textOf(document, "#activity-name"),
+            textOf(document, "#articleContentId"),
             attributeOf(document, "meta[property=og:title]", "content"),
             (try? document.title()),
             textOf(document, "h1")
@@ -50,6 +62,7 @@ enum ArticleExtractor {
 
         let author = firstText([
             textOf(document, "#js_name"),
+            attributeOf(document, "#uid", "title"),
             attributeOf(document, "meta[name=author]", "content"),
             textOf(document, ".author")
         ])
@@ -63,6 +76,7 @@ enum ArticleExtractor {
 
         let root = contentRoot(document)
         clean(root)
+        trimPromotions(root)
 
         let plainLength = (try? root.text())?.count ?? 0
         if plainLength < 80 {
@@ -91,6 +105,12 @@ enum ArticleExtractor {
     }
 
     private static func contentRoot(_ document: Document) -> Element {
+        // 微信、CSDN 等站点有明确的正文容器，命中即用，避免被页头、推荐位等外层容器抢走
+        for selector in ["#js_content", "#content_views"] {
+            guard let candidate = try? document.select(selector).first() else { continue }
+            let score = (try? candidate.text())?.count ?? 0
+            if score >= 100 { return candidate }
+        }
         var best: Element?
         var bestScore = 0
         for selector in contentSelectors {
@@ -101,9 +121,6 @@ enum ArticleExtractor {
                     best = candidate
                     bestScore = score
                 }
-            }
-            if selector == "#js_content", bestScore >= 100 {
-                break
             }
         }
         if let best, bestScore >= 200 {
@@ -128,6 +145,125 @@ enum ArticleExtractor {
                 }
             }
         }
+    }
+
+    /// 去掉正文容器内的公众号导流和文末推广：开头“点击名片关注”行、文末“文末福利/近期好文”等资料包与二维码。
+    /// 推广块必须在正文 60% 之后、自身文本就是标记词，且截断后剩余正文不少于 200 字，避免误伤正常段落。
+    private static func trimPromotions(_ root: Element) {
+        dropLeadingPromotions(root)
+        dropTailPromotion(root)
+        dropTrailingDecorations(root)
+    }
+
+    private static func dropLeadingPromotions(_ root: Element) {
+        var seenBlocks = 0
+        for child in root.children().array() {
+            let text = normalizeLabel((try? child.text()) ?? "")
+            if text.isEmpty { continue }
+            seenBlocks += 1
+            if seenBlocks > 2 { break }
+            guard text.count <= 30,
+                  leadingPromotions.contains(where: { text.contains($0) }) else { continue }
+            try? child.remove()
+        }
+    }
+
+    private static func dropTailPromotion(_ root: Element) {
+        let total = (try? root.text())?.count ?? 0
+        guard total >= 200,
+              let candidates = try? root.select(
+                  "p, section, div, h1, h2, h3, h4, h5, h6, blockquote"
+              ) else { return }
+
+        for candidate in candidates.array() {
+            let text = normalizeLabel((try? candidate.text()) ?? "")
+            guard !text.isEmpty, text.count <= 20,
+                  promotionMarkers.contains(text) else { continue }
+            let selfLength = (try? candidate.text())?.count ?? 0
+            let afterLength = textLength(after: candidate)
+            let position = total - selfLength - afterLength
+            guard position >= total * 3 / 5, position >= 200 else { continue }
+            removeTrailingMedia(before: candidate)
+            removeFrom(candidate, root: root)
+            return
+        }
+    }
+
+    private static func textLength(after element: Element) -> Int {
+        var length = 0
+        var current: Element? = element
+        while let node = current {
+            var sibling = try? node.nextElementSibling()
+            while let next = sibling {
+                length += (try? next.text())?.count ?? 0
+                sibling = try? next.nextElementSibling()
+            }
+            current = node.parent() as? Element
+        }
+        return length
+    }
+
+    /// 推广块的封面图常作为独立图片块紧挨在标记词前面，一并移除
+    private static func removeTrailingMedia(before element: Element) {
+        var previous = try? element.previousElementSibling()
+        var removed = 0
+        while let node = previous, removed < 2 {
+            let text = (try? node.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let imageCount = (try? node.select("img").size()) ?? 0
+            guard text.isEmpty, imageCount > 0 else { break }
+            let earlier = try? node.previousElementSibling()
+            try? node.remove()
+            removed += 1
+            previous = earlier
+        }
+    }
+
+    private static func removeFrom(_ element: Element, root: Element) {
+        // 只删标记块本身和它之后的内容；上层容器里可能还有标记之前的正文，不能整块删掉
+        var current: Element? = element
+        var removeSelf = true
+        while let node = current, node !== root {
+            var sibling = try? node.nextElementSibling()
+            while let next = sibling {
+                try? next.remove()
+                sibling = try? node.nextElementSibling()
+            }
+            let parent = node.parent() as? Element
+            if removeSelf {
+                try? node.remove()
+                removeSelf = false
+            }
+            current = parent
+        }
+    }
+
+    private static func dropTrailingDecorations(_ root: Element) {
+        while let last = root.children().last() {
+            let tag = last.tagName().lowercased()
+            if tag == "hr" {
+                try? last.remove()
+                continue
+            }
+            let text = (try? last.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let imageCount = (try? last.select("img").size()) ?? 0
+            if text.isEmpty && imageCount == 0 {
+                try? last.remove()
+                continue
+            }
+            break
+        }
+    }
+
+    private static func normalizeLabel(_ raw: String) -> String {
+        let collapsed = raw.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        var text = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = text.first, "*_# ".contains(first) {
+            text.removeFirst()
+        }
+        while let last = text.last, "*_# ：:，,。.！!？?、".contains(last) {
+            text.removeLast()
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func stripDuplicateTitle(_ markdown: String, title: String) -> String {
