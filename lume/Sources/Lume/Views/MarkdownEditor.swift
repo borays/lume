@@ -52,7 +52,7 @@ struct MarkdownEditor: NSViewRepresentable {
         context.coordinator.lastFontSize = EditorBridge.shared.fontSize
         context.coordinator.lastFontFamily = EditorBridge.shared.fontFamily
 
-        let scrollView = NSScrollView()
+        let scrollView = WidthTrackingScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true

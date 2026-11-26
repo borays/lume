@@ -43,7 +43,7 @@ struct MarkdownPreview: NSViewRepresentable {
         ]
         textView.delegate = context.coordinator
 
-        let scrollView = NSScrollView()
+        let scrollView = WidthTrackingScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -130,7 +130,9 @@ struct MarkdownPreview: NSViewRepresentable {
         coordinator: Coordinator?
     ) {
         let source = MarkdownRenderer.bodyWithoutTitleHeading(markdown, title: title)
-        let origin = preserveScroll ? scrollView.contentView.bounds.origin : .zero
+        var origin = preserveScroll ? scrollView.contentView.bounds.origin : .zero
+        // 预览只做纵向滚动，横向位置永远回到最左边。
+        origin.x = 0
         let selection = textView.selectedRange()
         var options = MarkdownRenderOptions()
         options.baseURL = baseURL
@@ -174,6 +176,10 @@ struct MarkdownPreview: NSViewRepresentable {
     }
 
     private static func availableContentWidth(scrollView: NSScrollView, textView: NSTextView) -> CGFloat {
+        let clipWidth = scrollView.contentView.bounds.width
+        if clipWidth > 80 {
+            return max(140, clipWidth - textView.textContainerInset.width * 2 - 16)
+        }
         if let width = textView.textContainer?.containerSize.width, width > 80 {
             return max(140, width - 16)
         }
@@ -206,7 +212,7 @@ struct MarkdownPreview: NSViewRepresentable {
             return
         }
 
-        let visibleOrigin = baseChanged ? NSPoint.zero : scrollView.contentView.bounds.origin
+        let visibleOrigin = baseChanged ? NSPoint.zero : NSPoint(x: 0, y: scrollView.contentView.bounds.origin.y)
         let selection = textView.selectedRange()
         var options = MarkdownRenderOptions()
         options.baseURL = baseURL
@@ -269,7 +275,7 @@ struct MarkdownPreview: NSViewRepresentable {
             if let container = textView.textContainer, let layout = textView.layoutManager {
                 layout.ensureLayout(for: container)
             }
-            scrollView.contentView.scroll(to: origin)
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: origin.y))
         }
 
         func observeHighlightUpdates() {
@@ -360,7 +366,7 @@ struct MarkdownPreview: NSViewRepresentable {
             }
             textView.setNeedsDisplay(textView.bounds)
             if let scrollView, let origin {
-                scrollView.contentView.scroll(to: origin)
+                scrollView.contentView.scroll(to: NSPoint(x: 0, y: origin.y))
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
             (textView as? PreviewTextView)?.refreshHoverAtMouse()

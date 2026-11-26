@@ -820,6 +820,33 @@ enum SelfTest {
             check(first != nil && second == first, "同一代码块内切换行图标不闪")
         }
 
+        // 旧 SDK 链接时 AppKit 只会按增量拉伸文档视图，必须锁回裁剪区宽度
+        do {
+            let scroll = WidthTrackingScrollView(frame: NSRect(x: 0, y: 0, width: 520, height: 300))
+            let storage = NSTextStorage(string: "宽度跟随测试")
+            let layout = NSLayoutManager()
+            storage.addLayoutManager(layout)
+            let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+            container.widthTracksTextView = true
+            layout.addTextContainer(container)
+            let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300), textContainer: container)
+            view.isVerticallyResizable = true
+            view.isHorizontallyResizable = false
+            view.autoresizingMask = [.width]
+            scroll.documentView = view
+            let window = NSWindow(
+                contentRect: NSRect(x: -4000, y: -4000, width: 520, height: 300),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.contentView = scroll
+            window.layoutIfNeeded()
+            check(abs(view.frame.width - scroll.contentView.bounds.width) < 1, "文本视图宽度跟随窗格（520）")
+            window.setContentSize(NSSize(width: 300, height: 300))
+            window.layoutIfNeeded()
+            check(abs(view.frame.width - scroll.contentView.bounds.width) < 1, "缩窄后文本视图继续跟随（300）")
+            window.orderOut(nil)
+        }
+
         if let result {
             var renderFailures = 0
             for note in result.notes.prefix(40) {
