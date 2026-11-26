@@ -31,7 +31,9 @@ enum ArticleExtractor {
         ".js_ad_link", ".rich_media_tool", ".rich_media_area_extra",
         "#js_pc_qr_code", "mp-common-profile", "mp-style-type",
         "mp-common-miniprogram", "mpvoice", "mpprofile",
-        ".mp_profile_iframe_wrp"
+        ".mp_profile_iframe_wrp",
+        // 新版公众号分享页会把「原文」指向和 IP 属地/发布时间放进正文容器
+        "#js_origin_source", ".rich_media_meta_list"
     ].joined(separator: ", ")
 
     private static let promotionMarkers = [

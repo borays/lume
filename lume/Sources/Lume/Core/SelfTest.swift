@@ -2,6 +2,30 @@ import AppKit
 import Foundation
 
 enum SelfTest {
+    /// `--fetch-web <url>`：在真实 app 运行环境里走隐藏 WKWebView 抓取，验证窗口收尾是否稳定
+    static func fetchWebDebugIfRequested() {
+        guard let index = CommandLine.arguments.firstIndex(of: "--fetch-web"),
+              index + 1 < CommandLine.arguments.count,
+              let url = URL(string: CommandLine.arguments[index + 1]) else { return }
+        Task { @MainActor in
+            let repeatCount = Int(ProcessInfo.processInfo.environment["MYNOTE_FETCH_REPEAT"] ?? "") ?? 1
+            do {
+                var page = try await WebPageFetcher.fetchWithWebKit(url)
+                for index in 1..<max(repeatCount, 1) {
+                    page = try await WebPageFetcher.fetchWithWebKit(url)
+                    print("round \(index + 1) ok")
+                }
+                try? page.html.write(toFile: "/tmp/mynote-webkit.html", atomically: true, encoding: .utf8)
+                print("webkit chars=\(page.html.count)")
+                print("finalURL=\(page.finalURL.absoluteString)")
+                exit(0)
+            } catch {
+                print("webkit failed: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+    }
+
     static func webImportDebugAndExit(_ raw: String) {
         Task { @MainActor in
             do {
@@ -586,6 +610,36 @@ enum SelfTest {
             check(output.suggestedTags == ["html", "前端"], "CSDN 关键词作为标签建议")
         } catch {
             check(false, "CSDN 网页导入解析失败：\(error.localizedDescription)")
+        }
+
+        // 网页导入：新版公众号分享页把「原文」和 IP 属地/时间放进正文容器
+        do {
+            let html = """
+            <html><head>
+            <meta property="og:title" content="分享页测试文章">
+            </head><body>
+            <div id="js_content">
+            <div id="js_image_content" class="image_content">
+            <h1 class="rich_media_title">分享页测试文章</h1>
+            <p id="js_image_desc" class="share_notice">这里是被分享的正文内容，说明分享页的正文放在图片描述容器里，需要完整保留，同时去掉页面追加的原文指向和属地区域信息，避免污染导入后的笔记。这段文字继续补充一些细节，让正文长度稳定超过提取阈值，不会因为清理噪声而被判定为空内容。</p>
+            </div>
+            <div id="js_origin_source" class="origin_source"><span class="origin_source_label">原文</span><span class="origin_source_title">另一个标题</span></div>
+            <div class="rich_media_tool"><span>工具条</span></div>
+            <div class="rich_media_meta_list"><span>广东</span><span>,</span><span id="publish_time">10月14日</span></div>
+            </div>
+            </body></html>
+            """
+            let output = try ArticleExtractor.extract(
+                html: html,
+                pageURL: URL(string: "https://mp.weixin.qq.com/s/share")!
+            )
+            check(output.title == "分享页测试文章", "分享页标题提取（\(output.title)）")
+            check(output.markdown.contains("被分享的正文内容"), "分享页正文保留")
+            check(!output.markdown.contains("另一个标题"), "分享页「原文」指向不进入正文")
+            check(!output.markdown.contains("10月14日"), "分享页属地与时间不进入正文")
+            check(output.publishedAt == "10月14日", "分享页发布时间仍写入元数据")
+        } catch {
+            check(false, "分享页网页导入解析失败：\(error.localizedDescription)")
         }
 
         // 网页导入：开头导流与文末推广截断

@@ -88,6 +88,9 @@ private final class WebKitPageLoader: NSObject, WKNavigationDelegate {
                 backing: .buffered,
                 defer: false
             )
+            // 窗口生命周期由 ARC 管理；close() 的排序动画在 macOS 26 上会被重复释放而崩溃
+            window.isReleasedWhenClosed = false
+            window.animationBehavior = .none
             window.contentView = webView
             window.orderBack(nil)
             self.window = window
@@ -152,8 +155,8 @@ private final class WebKitPageLoader: NSObject, WKNavigationDelegate {
         }
         webView?.stopLoading()
         webView?.navigationDelegate = nil
+        window?.orderOut(nil)
         window?.contentView = nil
-        window?.close()
         window = nil
         webView = nil
     }

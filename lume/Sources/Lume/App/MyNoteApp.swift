@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ThemeManager.shared.apply()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        SelfTest.fetchWebDebugIfRequested()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
